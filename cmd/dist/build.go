@@ -273,7 +273,7 @@ func usage() {
 // Version prints the Go version.
 func cmdversion() {
 	xflagparse(0)
-	xprintf("%s\n", findgoversion())
+	xprintf("version is %s\n", findgoversion())
 }
 
 // findgoversion determines the Go version to use in the version string.
@@ -345,6 +345,7 @@ func isGitRepo() bool {
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(goroot, gitDir)
 	}
+	_p("gitDir=", gitDir)
 	fi, err := os.Stat(gitDir)
 	return err == nil && fi.IsDir()
 }
