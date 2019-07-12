@@ -25,6 +25,7 @@ var cmdtab = []struct {
 	{"banner", cmdbanner},
 	{"test", cmdtest},
 	{"clean", cmdclean},
+	{"list", cmdlist},
 	/*
 		{"bootstrap", cmdbootstrap},
 
