@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +73,54 @@ var okgoos = []string{
 	"openbsd",
 	"plan9",
 	"windows",
+}
+
+// Cannot use go/build directly because cmd/dist for a new release
+// builds against an old release's go/build, which may be out of sync.
+// To reduce duplication, we generate the list for go/build from this.
+//
+// We list all supported platforms in this list, so that this is the
+// single point of truth for supported platforms. This list is used
+// by 'go tool dist list'.
+var cgoEnabled = map[string]bool{
+	"darwin/386":      true,
+	"darwin/amd64":    true,
+	"darwin/arm":      true,
+	"darwin/arm64":    true,
+	"dragonfly/amd64": true,
+	"freebsd/386":     true,
+	"freebsd/amd64":   true,
+	"freebsd/arm":     false,
+	"linux/386":       true,
+	"linux/amd64":     true,
+	"linux/arm":       true,
+	"linux/arm64":     true,
+	"linux/ppc64":     false,
+	"linux/ppc64le":   true,
+	"linux/mips":      true,
+	"linux/mipsle":    true,
+	"linux/mips64":    true,
+	"linux/mips64le":  true,
+	"linux/s390x":     true,
+	"android/386":     true,
+	"android/amd64":   true,
+	"android/arm":     true,
+	"android/arm64":   true,
+	"nacl/386":        false,
+	"nacl/amd64p32":   false,
+	"nacl/arm":        false,
+	"netbsd/386":      true,
+	"netbsd/amd64":    true,
+	"netbsd/arm":      true,
+	"openbsd/386":     true,
+	"openbsd/amd64":   true,
+	"openbsd/arm":     false,
+	"plan9/386":       false,
+	"plan9/amd64":     false,
+	"plan9/arm":       false,
+	"solaris/amd64":   true,
+	"windows/386":     true,
+	"windows/amd64":   true,
 }
 
 // find reports the first index of p in l[0:n], or else -1.
@@ -377,4 +426,45 @@ func branchtag(branch string) (tag string, precise bool) {
 		break
 	}
 	return
+}
+
+// Banner prints the 'now you've installed Go' banner.
+func cmdbanner() {
+	xflagparse(0)
+
+	xprintf("\n")
+	xprintf("---\n")
+	xprintf("Installed Go for %s/%s in %s\n", goos, goarch, goroot)
+	xprintf("Installed commands in %s\n", gobin)
+
+	if !xsamefile(goroot_final, goroot) {
+		// If the files are to be moved, don't check that gobin
+		// is on PATH; assume they know what they are doing.
+	} else if gohostos == "plan9" {
+		// Check that gobin is bound before /bin.
+		pid := strings.Replace(readfile("#c/pid"), " ", "", -1)
+		ns := fmt.Sprintf("/proc/%s/ns", pid)
+		if !strings.Contains(readfile(ns), fmt.Sprintf("bind -b %s /bin", gobin)) {
+			xprintf("*** You need to bind %s before /bin.\n", gobin)
+		}
+	} else {
+		// Check that gobin appears in $PATH.
+		pathsep := ":"
+		if gohostos == "windows" {
+			pathsep = ";"
+		}
+		if !strings.Contains(pathsep+os.Getenv("PATH")+pathsep, pathsep+gobin+pathsep) {
+			xprintf("*** You need to add %s to your PATH.\n", gobin)
+		}
+	}
+
+	if !xsamefile(goroot_final, goroot) {
+		xprintf("\n"+
+			"The binaries expect %s to be copied or moved to %s\n",
+			goroot, goroot_final)
+	}
+}
+
+func cmdclean() {
+
 }

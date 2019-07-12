@@ -22,16 +22,15 @@ var cmdtab = []struct {
 }{
 
 	{"version", cmdversion},
-
+	{"banner", cmdbanner},
+	{"test", cmdtest},
+	{"clean", cmdclean},
 	/*
-		{"banner", cmdbanner},
 		{"bootstrap", cmdbootstrap},
-		{"clean", cmdclean},
+
 		{"env", cmdenv},
 		{"install", cmdinstall},
 		{"list", cmdlist},
-		{"test", cmdtest},
-		{"version", cmdversion},
 	*/
 }
 
