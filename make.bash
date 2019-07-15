@@ -64,3 +64,22 @@ fi
 
 echo
 
+if [ "$1" = "--dist-tool" ]; then
+    # Stop after building dist tool.
+    mkdir -p "$GOTOOLDIR"
+    if [ "$2" != "" ]; then
+        cp cmd/dist/dist "$2"
+    fi
+    mv cmd/dist/dist "$GOTOOLDIR"/dist
+    exit 0
+fi
+
+
+
+buildall="-a"
+if [ "$1" = "--no-clean" ]; then
+    buildall=""
+    shift
+fi
+echo ./cmd/dist/dist bootstrap $buildall $GO_DISTFLAGS -v # builds go_bootstrap
+./cmd/dist/dist bootstrap $buildall $GO_DISTFLAGS -v # builds go_bootstrap
