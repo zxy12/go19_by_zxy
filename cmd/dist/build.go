@@ -5,13 +5,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Initialization for any invocation.
@@ -595,4 +598,691 @@ func clean() {
 		// Remove cached version info.
 		xremove(pathf("%s/VERSION.cache", goroot))
 	}
+}
+
+// The env command prints the default environment.
+func cmdenv() {
+	path := flag.Bool("p", false, "emit updated PATH")
+	plan9 := flag.Bool("9", false, "emit plan 9 syntax")
+	windows := flag.Bool("w", false, "emit windows syntax")
+	xflagparse(0)
+
+	format := "%s=\"%s\"\n"
+	switch {
+	case *plan9:
+		format = "%s='%s'\n"
+	case *windows:
+		format = "set %s=%s\r\n"
+	}
+
+	xprintf(format, "CC", defaultcc)
+	xprintf(format, "CC_FOR_TARGET", defaultcctarget)
+	xprintf(format, "GOROOT", goroot)
+	xprintf(format, "GOBIN", gobin)
+	xprintf(format, "GOARCH", goarch)
+	xprintf(format, "GOOS", goos)
+	xprintf(format, "GOHOSTARCH", gohostarch)
+	xprintf(format, "GOHOSTOS", gohostos)
+	xprintf(format, "GOTOOLDIR", tooldir)
+	if goarch == "arm" {
+		xprintf(format, "GOARM", goarm)
+	}
+	if goarch == "386" {
+		xprintf(format, "GO386", go386)
+	}
+
+	if *path {
+		sep := ":"
+		if gohostos == "windows" {
+			sep = ";"
+		}
+		xprintf(format, "PATH", fmt.Sprintf("%s%s%s", gobin, sep, os.Getenv("PATH")))
+	}
+}
+
+// Install installs the list of packages named on the command line.
+func cmdinstall() {
+
+	xflagparse(-1)
+
+	if flag.NArg() == 0 {
+		install(defaulttarg())
+	}
+
+	for _, arg := range flag.Args() {
+		install(arg)
+	}
+}
+
+func defaulttarg() string {
+	// xgetwd might return a path with symlinks fully resolved, and if
+	// there happens to be symlinks in goroot, then the hasprefix test
+	// will never succeed. Instead, we use xrealwd to get a canonical
+	// goroot/src before the comparison to avoid this problem.
+	pwd := xgetwd()
+	src := pathf("%s/src/", goroot)
+	real_src := xrealwd(src)
+	if !strings.HasPrefix(pwd, real_src) {
+		fatal("current directory %s is not under %s", pwd, real_src)
+	}
+	pwd = pwd[len(real_src):]
+	// guard against xrealwd returning the directory without the trailing /
+	pwd = strings.TrimPrefix(pwd, "/")
+
+	return pwd
+}
+
+// installed maps from a dir name (as given to install) to a chan
+// closed when the dir's package is installed.
+var installed = make(map[string]chan struct{})
+
+// install installs the library, package, or binary associated with dir,
+// which is relative to $GOROOT/src.
+func install(dir string) {
+	if ch, ok := installed[dir]; ok {
+		defer close(ch)
+	}
+
+	for _, dep := range builddeps[dir] {
+		<-installed[dep]
+	}
+
+	if vflag > 0 {
+		if goos != gohostos || goarch != gohostarch {
+			errprintf("%s (%s/%s)\n", dir, goos, goarch)
+		} else {
+			errprintf("%s\n", dir)
+		}
+	}
+
+	workdir := pathf("%s/%s", workdir, dir)
+	xmkdirall(workdir)
+
+	var clean []string
+	defer func() {
+		for _, name := range clean {
+			xremove(name)
+		}
+	}()
+
+	// path = full path to dir.
+	path := pathf("%s/src/%s", goroot, dir)
+	name := filepath.Base(dir)
+
+	ispkg := !strings.HasPrefix(dir, "cmd/") || strings.Contains(dir, "/internal/")
+
+	// Start final link command line.
+	// Note: code below knows that link.p[targ] is the target.
+	var (
+		link      []string
+		targ      int
+		ispackcmd bool
+	)
+	if ispkg {
+		// Go library (package).
+		ispackcmd = true
+		link = []string{"pack", pathf("%s/pkg/%s_%s/%s.a", goroot, goos, goarch, dir)}
+		targ = len(link) - 1
+		xmkdirall(filepath.Dir(link[targ]))
+	} else {
+		// Go command.
+		elem := name
+		if elem == "go" {
+			elem = "go_bootstrap"
+		}
+		link = []string{pathf("%s/link", tooldir), "-o", pathf("%s/%s%s", tooldir, elem, exe)}
+		targ = len(link) - 1
+	}
+	ttarg := mtime(link[targ])
+
+	// Gather files that are sources for this target.
+	// Everything in that directory, and any target-specific
+	// additions.
+	files := xreaddir(path)
+
+	// Remove files beginning with . or _,
+	// which are likely to be editor temporary files.
+	// This is the same heuristic build.ScanDir uses.
+	// There do exist real C files beginning with _,
+	// so limit that check to just Go files.
+	files = filter(files, func(p string) bool {
+		return !strings.HasPrefix(p, ".") && (!strings.HasPrefix(p, "_") || !strings.HasSuffix(p, ".go"))
+	})
+
+	for _, dt := range deptab {
+		if dir == dt.prefix || strings.HasSuffix(dt.prefix, "/") && strings.HasPrefix(dir, dt.prefix) {
+			for _, p := range dt.dep {
+				p = os.ExpandEnv(p)
+				files = append(files, p)
+			}
+		}
+	}
+	files = uniq(files)
+
+	// Convert to absolute paths.
+	for i, p := range files {
+		if !isabs(p) {
+			files[i] = pathf("%s/%s", path, p)
+		}
+	}
+
+	// Is the target up-to-date?
+	var gofiles, missing []string
+	stale := rebuildall
+	files = filter(files, func(p string) bool {
+		for _, suf := range depsuffix {
+			if strings.HasSuffix(p, suf) {
+				goto ok
+			}
+		}
+		return false
+	ok:
+		t := mtime(p)
+		if !t.IsZero() && !strings.HasSuffix(p, ".a") && !shouldbuild(p, dir) {
+			return false
+		}
+		if strings.HasSuffix(p, ".go") {
+			gofiles = append(gofiles, p)
+		}
+		if t.After(ttarg) {
+			stale = true
+		}
+		if t.IsZero() {
+			missing = append(missing, p)
+		}
+		return true
+	})
+
+	// If there are no files to compile, we're done.
+	if len(files) == 0 {
+		return
+	}
+
+	if !stale {
+		return
+	}
+
+	// For package runtime, copy some files into the work space.
+	if dir == "runtime" || strings.HasPrefix(dir, "runtime/internal/") {
+		xmkdirall(pathf("%s/pkg/include", goroot))
+		// For use by assembly and C files.
+		copyfile(pathf("%s/pkg/include/textflag.h", goroot),
+			pathf("%s/src/runtime/textflag.h", goroot), 0)
+		copyfile(pathf("%s/pkg/include/funcdata.h", goroot),
+			pathf("%s/src/runtime/funcdata.h", goroot), 0)
+		copyfile(pathf("%s/pkg/include/asm_ppc64x.h", goroot),
+			pathf("%s/src/runtime/asm_ppc64x.h", goroot), 0)
+	}
+
+	// Generate any missing files; regenerate existing ones.
+	for _, p := range files {
+		elem := filepath.Base(p)
+		for _, gt := range gentab {
+			if gt.gen == nil {
+				continue
+			}
+			if strings.HasPrefix(elem, gt.nameprefix) {
+				if vflag > 1 {
+					errprintf("generate %s\n", p)
+				}
+				gt.gen(path, p)
+				// Do not add generated file to clean list.
+				// In runtime, we want to be able to
+				// build the package with the go tool,
+				// and it assumes these generated files already
+				// exist (it does not know how to build them).
+				// The 'clean' command can remove
+				// the generated files.
+				goto built
+			}
+		}
+		// Did not rebuild p.
+		if find(p, missing) >= 0 {
+			fatal("missing file %s", p)
+		}
+	built:
+	}
+
+	if goos != gohostos || goarch != gohostarch {
+		// We've generated the right files; the go command can do the build.
+		if vflag > 1 {
+			errprintf("skip build for cross-compile %s\n", dir)
+		}
+		return
+	}
+
+	var archive string
+	// The next loop will compile individual non-Go files.
+	// Hand the Go files to the compiler en masse.
+	// For package runtime, this writes go_asm.h, which
+	// the assembly files will need.
+	pkg := dir
+	if strings.HasPrefix(dir, "cmd/") {
+		pkg = "main"
+	}
+	b := pathf("%s/_go_.a", workdir)
+	clean = append(clean, b)
+	if !ispackcmd {
+		link = append(link, b)
+	} else {
+		archive = b
+	}
+	compile := []string{pathf("%s/compile", tooldir), "-pack", "-o", b, "-p", pkg}
+	if gogcflags != "" {
+		compile = append(compile, strings.Fields(gogcflags)...)
+	}
+	if dir == "runtime" {
+		compile = append(compile, "-+", "-asmhdr", pathf("%s/go_asm.h", workdir))
+	}
+	compile = append(compile, gofiles...)
+	run(path, CheckExit|ShowOutput, compile...)
+
+	// Compile the files.
+	var wg sync.WaitGroup
+	for _, p := range files {
+		if !strings.HasSuffix(p, ".s") {
+			continue
+		}
+
+		var compile []string
+		// Assembly file for a Go package.
+		compile = []string{
+			pathf("%s/asm", tooldir),
+			"-I", workdir,
+			"-I", pathf("%s/pkg/include", goroot),
+			"-D", "GOOS_" + goos,
+			"-D", "GOARCH_" + goarch,
+			"-D", "GOOS_GOARCH_" + goos + "_" + goarch,
+		}
+
+		doclean := true
+		b := pathf("%s/%s", workdir, filepath.Base(p))
+
+		// Change the last character of the output file (which was c or s).
+		b = b[:len(b)-1] + "o"
+		compile = append(compile, "-o", b, p)
+		bgrun(&wg, path, compile...)
+
+		link = append(link, b)
+		if doclean {
+			clean = append(clean, b)
+		}
+	}
+	bgwait(&wg)
+
+	if ispackcmd {
+		xremove(link[targ])
+		dopack(link[targ], archive, link[targ+1:])
+		return
+	}
+
+	// Remove target before writing it.
+	xremove(link[targ])
+	run("", CheckExit|ShowOutput, link...)
+}
+
+/*
+ * Tool building
+ */
+
+// deptab lists changes to the default dependencies for a given prefix.
+// deps ending in /* read the whole directory; deps beginning with -
+// exclude files with that prefix.
+var deptab = []struct {
+	prefix string   // prefix of target
+	dep    []string // dependency tweaks for targets with that prefix
+}{
+	{"cmd/go/internal/cfg", []string{
+		"zdefaultcc.go",
+		"zosarch.go",
+	}},
+	{"runtime/internal/sys", []string{
+		"zversion.go",
+	}},
+	{"go/build", []string{
+		"zcgo.go",
+	}},
+}
+
+// shouldbuild reports whether we should build this file.
+// It applies the same rules that are used with context tags
+// in package go/build, except it's less picky about the order
+// of GOOS and GOARCH.
+// We also allow the special tag cmd_go_bootstrap.
+// See ../go/bootstrap.go and package go/build.
+func shouldbuild(file, dir string) bool {
+	// Check file name for GOOS or GOARCH.
+	name := filepath.Base(file)
+	excluded := func(list []string, ok string) bool {
+		for _, x := range list {
+			if x == ok || ok == "android" && x == "linux" {
+				continue
+			}
+			i := strings.Index(name, x)
+			if i <= 0 || name[i-1] != '_' {
+				continue
+			}
+			i += len(x)
+			if i == len(name) || name[i] == '.' || name[i] == '_' {
+				return true
+			}
+		}
+		return false
+	}
+	if excluded(okgoos, goos) || excluded(okgoarch, goarch) {
+		return false
+	}
+
+	// Omit test files.
+	if strings.Contains(name, "_test") {
+		return false
+	}
+
+	// Check file contents for // +build lines.
+	for _, p := range splitlines(readfile(file)) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		code := p
+		i := strings.Index(code, "//")
+		if i > 0 {
+			code = strings.TrimSpace(code[:i])
+		}
+		if code == "package documentation" {
+			return false
+		}
+		if code == "package main" && dir != "cmd/go" && dir != "cmd/cgo" {
+			return false
+		}
+		if !strings.HasPrefix(p, "//") {
+			break
+		}
+		if !strings.Contains(p, "+build") {
+			continue
+		}
+		fields := splitfields(p[2:])
+		if len(fields) < 1 || fields[0] != "+build" {
+			continue
+		}
+		for _, p := range fields[1:] {
+			if matchfield(p) {
+				goto fieldmatch
+			}
+		}
+		return false
+	fieldmatch:
+	}
+
+	return true
+}
+
+// copy copies the file src to dst, via memory (so only good for small files).
+func copyfile(dst, src string, flag int) {
+	if vflag > 1 {
+		errprintf("cp %s %s\n", src, dst)
+	}
+	writefile(readfile(src), dst, flag)
+}
+
+// dopack copies the package src to dst,
+// appending the files listed in extra.
+// The archive format is the traditional Unix ar format.
+func dopack(dst, src string, extra []string) {
+	bdst := bytes.NewBufferString(readfile(src))
+	for _, file := range extra {
+		b := readfile(file)
+		// find last path element for archive member name
+		i := strings.LastIndex(file, "/") + 1
+		j := strings.LastIndex(file, `\`) + 1
+		if i < j {
+			i = j
+		}
+		fmt.Fprintf(bdst, "%-16.16s%-12d%-6d%-6d%-8o%-10d`\n", file[i:], 0, 0, 0, 0644, len(b))
+		bdst.WriteString(b)
+		if len(b)&1 != 0 {
+			bdst.WriteByte(0)
+		}
+	}
+	writefile(bdst.String(), dst, 0)
+}
+
+// matchfield reports whether the field (x,y,z) matches this build.
+// all the elements in the field must be satisfied.
+func matchfield(f string) bool {
+	for _, tag := range strings.Split(f, ",") {
+		if !matchtag(tag) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchtag reports whether the tag (x or !x) matches this build.
+func matchtag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	if tag[0] == '!' {
+		if len(tag) == 1 || tag[1] == '!' {
+			return false
+		}
+		return !matchtag(tag[1:])
+	}
+	return tag == "gc" || tag == goos || tag == goarch || tag == "cmd_go_bootstrap" || tag == "go1.1" || (goos == "android" && tag == "linux")
+}
+
+// The bootstrap command runs a build from scratch,
+// stopping at having installed the go_bootstrap command.
+func cmdbootstrap() {
+	flag.BoolVar(&rebuildall, "a", rebuildall, "rebuild all")
+	xflagparse(0)
+
+	if isdir(pathf("%s/src/pkg", goroot)) {
+		fatal("\n\n"+
+			"The Go package sources have moved to $GOROOT/src.\n"+
+			"*** %s still exists. ***\n"+
+			"It probably contains stale files that may confuse the build.\n"+
+			"Please (check what's there and) remove it and try again.\n"+
+			"See https://golang.org/s/go14nopkg\n",
+			pathf("%s/src/pkg", goroot))
+	}
+
+	if rebuildall {
+		clean()
+	}
+
+	setup()
+
+	checkCC()
+	bootstrapBuildTools()
+
+	// For the main bootstrap, building for host os/arch.
+	oldgoos = goos
+	oldgoarch = goarch
+	goos = gohostos
+	goarch = gohostarch
+	os.Setenv("GOHOSTARCH", gohostarch)
+	os.Setenv("GOHOSTOS", gohostos)
+	os.Setenv("GOARCH", goarch)
+	os.Setenv("GOOS", goos)
+
+	// TODO(rsc): Enable when appropriate.
+	// This step is only needed if we believe that the Go compiler built from Go 1.4
+	// will produce different object files than the Go compiler built from itself.
+	// In the absence of bugs, that should not happen.
+	// And if there are bugs, they're more likely in the current development tree
+	// than in a standard release like Go 1.4, so don't do this rebuild by default.
+	if false {
+		xprintf("##### Building Go toolchain using itself.\n")
+		for _, dir := range buildlist {
+			installed[dir] = make(chan struct{})
+		}
+		var wg sync.WaitGroup
+		for _, dir := range builddeps["cmd/go"] {
+			wg.Add(1)
+			dir := dir
+			go func() {
+				defer wg.Done()
+				install(dir)
+			}()
+		}
+		wg.Wait()
+		xprintf("\n")
+	}
+
+	xprintf("##### Building go_bootstrap for host, %s/%s.\n", gohostos, gohostarch)
+	for _, dir := range buildlist {
+		installed[dir] = make(chan struct{})
+	}
+	for _, dir := range buildlist {
+		go install(dir)
+	}
+	<-installed["cmd/go"]
+
+	goos = oldgoos
+	goarch = oldgoarch
+	os.Setenv("GOARCH", goarch)
+	os.Setenv("GOOS", goos)
+
+	// Build runtime for actual goos/goarch too.
+	if goos != gohostos || goarch != gohostarch {
+		installed["runtime"] = make(chan struct{})
+		install("runtime")
+	}
+}
+
+// setup sets up the tree for the initial build.
+func setup() {
+	// Create bin directory.
+	if p := pathf("%s/bin", goroot); !isdir(p) {
+		xmkdir(p)
+	}
+
+	// Create package directory.
+	if p := pathf("%s/pkg", goroot); !isdir(p) {
+		xmkdir(p)
+	}
+
+	p := pathf("%s/pkg/%s_%s", goroot, gohostos, gohostarch)
+	if rebuildall {
+		xremoveall(p)
+	}
+	xmkdirall(p)
+
+	if goos != gohostos || goarch != gohostarch {
+		p := pathf("%s/pkg/%s_%s", goroot, goos, goarch)
+		if rebuildall {
+			xremoveall(p)
+		}
+		xmkdirall(p)
+	}
+
+	// Create object directory.
+	// We keep it in pkg/ so that all the generated binaries
+	// are in one tree. If pkg/obj/libgc.a exists, it is a dreg from
+	// before we used subdirectories of obj. Delete all of obj
+	// to clean up.
+	if p := pathf("%s/pkg/obj/libgc.a", goroot); isfile(p) {
+		xremoveall(pathf("%s/pkg/obj", goroot))
+	}
+	p = pathf("%s/pkg/obj/%s_%s", goroot, gohostos, gohostarch)
+	if rebuildall {
+		xremoveall(p)
+	}
+	xmkdirall(p)
+
+	// Create tool directory.
+	// We keep it in pkg/, just like the object directory above.
+	if rebuildall {
+		xremoveall(tooldir)
+	}
+	xmkdirall(tooldir)
+
+	// Remove tool binaries from before the tool/gohostos_gohostarch
+	xremoveall(pathf("%s/bin/tool", goroot))
+
+	// Remove old pre-tool binaries.
+	for _, old := range oldtool {
+		xremove(pathf("%s/bin/%s", goroot, old))
+	}
+
+	// If $GOBIN is set and has a Go compiler, it must be cleaned.
+	for _, char := range "56789" {
+		if isfile(pathf("%s%s%c%s", gobin, slash, char, "g")) {
+			for _, old := range oldtool {
+				xremove(pathf("%s/%s", gobin, old))
+			}
+			break
+		}
+	}
+
+	// For release, make sure excluded things are excluded.
+	goversion := findgoversion()
+	if strings.HasPrefix(goversion, "release.") || (strings.HasPrefix(goversion, "go") && !strings.Contains(goversion, "beta")) {
+		for _, dir := range unreleased {
+			if p := pathf("%s/%s", goroot, dir); isdir(p) {
+				fatal("%s should not exist in release build", p)
+			}
+		}
+	}
+}
+
+func checkCC() {
+	if !needCC() {
+		return
+	}
+	if output, err := exec.Command(defaultcc, "--help").CombinedOutput(); err != nil {
+		outputHdr := ""
+		if len(output) > 0 {
+			outputHdr = "\nCommand output:\n\n"
+		}
+		fatal("cannot invoke C compiler %q: %v\n\n"+
+			"Go needs a system C compiler for use with cgo.\n"+
+			"To set a C compiler, set CC=the-compiler.\n"+
+			"To disable cgo, set CGO_ENABLED=0.\n%s%s", defaultcc, err, outputHdr, output)
+	}
+}
+
+// The old tools that no longer live in $GOBIN or $GOROOT/bin.
+var oldtool = []string{
+	"5a", "5c", "5g", "5l",
+	"6a", "6c", "6g", "6l",
+	"8a", "8c", "8g", "8l",
+	"9a", "9c", "9g", "9l",
+	"6cov",
+	"6nm",
+	"6prof",
+	"cgo",
+	"ebnflint",
+	"goapi",
+	"gofix",
+	"goinstall",
+	"gomake",
+	"gopack",
+	"gopprof",
+	"gotest",
+	"gotype",
+	"govet",
+	"goyacc",
+	"quietgcc",
+}
+
+// Unreleased directories (relative to $GOROOT) that should
+// not be in release branches.
+var unreleased = []string{
+	"src/cmd/newlink",
+	"src/cmd/objwriter",
+	"src/debug/goobj",
+	"src/old",
+}
+
+func needCC() bool {
+	switch os.Getenv("CGO_ENABLED") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	return cgoEnabled[gohostos+"/"+gohostarch]
 }

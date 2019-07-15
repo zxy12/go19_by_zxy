@@ -26,13 +26,9 @@ var cmdtab = []struct {
 	{"test", cmdtest},
 	{"clean", cmdclean},
 	{"list", cmdlist},
-	/*
-		{"bootstrap", cmdbootstrap},
-
-		{"env", cmdenv},
-		{"install", cmdinstall},
-		{"list", cmdlist},
-	*/
+	{"env", cmdenv},
+	{"install", cmdinstall},
+	{"bootstrap", cmdbootstrap},
 }
 
 var _p_open bool = false
