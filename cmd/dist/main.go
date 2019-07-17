@@ -31,7 +31,11 @@ var cmdtab = []struct {
 	{"bootstrap", cmdbootstrap},
 }
 
-var _p_open bool = false
+/**
+ * 1: bufio之前
+ * 2: bufio
+ */
+var _p_open int = 2
 
 func (c *count) String() string {
 	return fmt.Sprint(int(*c))
@@ -72,9 +76,9 @@ func main() {
 		os.Exit(0)
 	}
 	slash = string(filepath.Separator)
-	_p("slash=" + slash)
+	_p(1, "slash="+slash)
 	gohostos = runtime.GOOS
-	_p("gohostos=", gohostos)
+	_p(1, "gohostos=", gohostos)
 
 	switch gohostos {
 	case "darwin":
@@ -103,9 +107,9 @@ func main() {
 	}
 
 	sysinit()
-	_p("gohostarch=" + gohostarch)
+	_p(1, "gohostarch="+gohostarch)
 	out := run("", CheckExit, "uname", "-m")
-	_p("out=" + out)
+	_p(1, "out="+out)
 	if gohostarch == "" {
 		// Default Unix system.
 		out := run("", CheckExit, "uname", "-m")
@@ -214,9 +218,16 @@ func xflagparse(maxargs int) {
 	}
 }
 
-func _p(args ...interface{}) {
-	if !_p_open {
+func _p(level int, args ...interface{}) {
+	if level < _p_open {
 		return
 	}
 	fmt.Println(args...)
+}
+
+func _pf(level int, args ...interface{}) {
+	if level < _p_open {
+		return
+	}
+	fmt.Printf(args[0].(string), args[1:]...)
 }

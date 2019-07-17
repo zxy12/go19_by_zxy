@@ -401,6 +401,7 @@ func xmkdirall(p string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	_pf(2, "mkdir:[%s]\n", p)
 }
 
 // xremove removes the file p.
@@ -408,6 +409,7 @@ func xremove(p string) {
 	if vflag > 2 {
 		errprintf("rm %s\n", p)
 	}
+	_pf(2, "rm file:[%s]\n", p)
 	os.Remove(p)
 }
 
@@ -424,7 +426,7 @@ func xremoveall(p string) {
 func xreaddirfiles(dir string) []string {
 	f, err := os.Open(dir)
 	if err != nil {
-		fatal("%v", err)
+		fatal("open dir:%v", err)
 	}
 	defer f.Close()
 	infos, err := f.Readdir(-1)

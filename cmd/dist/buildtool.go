@@ -95,6 +95,7 @@ func bootstrapBuildTools() {
 	if goroot_bootstrap == "" {
 		goroot_bootstrap = pathf("%s/go1.4", os.Getenv("HOME"))
 	}
+	_p(2, "GOROOT_BOOTSTRAP=", goroot_bootstrap)
 	xprintf("##### Building Go toolchain using %s.\n", goroot_bootstrap)
 
 	mkzbootstrap(pathf("%s/src/cmd/internal/objabi/zbootstrap.go", goroot))
@@ -107,6 +108,7 @@ func bootstrapBuildTools() {
 	workspace := pathf("%s/pkg/bootstrap", goroot)
 	xremoveall(workspace)
 	base := pathf("%s/src/bootstrap", workspace)
+	_p(2, "base-bootstrap:", base)
 	xmkdirall(base)
 
 	// Copy source code into $GOROOT/pkg/bootstrap and rewrite import paths.
@@ -114,6 +116,7 @@ func bootstrapBuildTools() {
 		src := pathf("%s/src/%s", goroot, dir)
 		dst := pathf("%s/%s", base, dir)
 		xmkdirall(dst)
+
 	Dir:
 		for _, name := range xreaddirfiles(src) {
 			for _, pre := range ignorePrefixes {

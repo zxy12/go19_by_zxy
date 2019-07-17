@@ -154,7 +154,7 @@ func xinit() {
 		// if not "/" or "c:\", then strip trailing path separator
 		goroot = strings.TrimSuffix(goroot, slash)
 	}
-	_p(goroot)
+	_p(1, goroot)
 
 	if goroot == "" {
 		fatal("$GOROOT must be set")
@@ -196,10 +196,10 @@ func xinit() {
 		}
 	}
 	go386 = b
-	_p("go386=", go386)
+	_p(1, "go386=", go386)
 
 	p := pathf("%s/src/all.bash", goroot)
-	_p(p)
+	_p(1, p)
 	if !isfile(p) {
 		fatal("$GOROOT is not set correctly or not exported\n"+
 			"\tGOROOT=%s\n"+
@@ -211,7 +211,7 @@ func xinit() {
 		gohostarch = b
 	}
 
-	_p("gohostarch=", gohostarch)
+	_p(1, "gohostarch=", gohostarch)
 	if find(gohostarch, okgoarch) < 0 {
 		fatal("unknown $GOHOSTARCH %s", gohostarch)
 	}
@@ -295,12 +295,12 @@ func xinit() {
 	os.Setenv("LANGUAGE", "en_US.UTF8")
 
 	workdir = xworkdir()
-	_p(workdir)
+	_p(1, workdir)
 
 	xatexit(rmworkdir)
 
 	tooldir = pathf("%s/pkg/tool/%s_%s", goroot, gohostos, gohostarch)
-	_p(tooldir)
+	_p(1, tooldir)
 }
 
 /*
@@ -400,7 +400,7 @@ func isGitRepo() bool {
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(goroot, gitDir)
 	}
-	_p("gitDir=", gitDir)
+	_p(1, "gitDir=", gitDir)
 	fi, err := os.Stat(gitDir)
 	return err == nil && fi.IsDir()
 }
@@ -562,8 +562,10 @@ func makeBuildlist() []string {
 }
 
 func clean() {
+
 	for _, name := range buildlist {
 		path := pathf("%s/src/%s", goroot, name)
+
 		// Remove generated files.
 		for _, elem := range xreaddir(path) {
 			for _, gt := range gentab {
@@ -1075,9 +1077,11 @@ func matchtag(tag string) bool {
 // The bootstrap command runs a build from scratch,
 // stopping at having installed the go_bootstrap command.
 func cmdbootstrap() {
+
 	flag.BoolVar(&rebuildall, "a", rebuildall, "rebuild all")
 	xflagparse(0)
 
+	_p(2, "goroot=", goroot)
 	if isdir(pathf("%s/src/pkg", goroot)) {
 		fatal("\n\n"+
 			"The Go package sources have moved to $GOROOT/src.\n"+
@@ -1095,8 +1099,9 @@ func cmdbootstrap() {
 	setup()
 
 	checkCC()
-	bootstrapBuildTools()
 
+	bootstrapBuildTools()
+	return
 	// For the main bootstrap, building for host os/arch.
 	oldgoos = goos
 	oldgoarch = goarch
@@ -1219,6 +1224,7 @@ func setup() {
 
 	// For release, make sure excluded things are excluded.
 	goversion := findgoversion()
+	_p(2, "goversion=", goversion)
 	if strings.HasPrefix(goversion, "release.") || (strings.HasPrefix(goversion, "go") && !strings.Contains(goversion, "beta")) {
 		for _, dir := range unreleased {
 			if p := pathf("%s/%s", goroot, dir); isdir(p) {
@@ -1241,6 +1247,8 @@ func checkCC() {
 			"Go needs a system C compiler for use with cgo.\n"+
 			"To set a C compiler, set CC=the-compiler.\n"+
 			"To disable cgo, set CGO_ENABLED=0.\n%s%s", defaultcc, err, outputHdr, output)
+	} else {
+		_p(2, "checkCC output:", string(defaultcc), "--help")
 	}
 }
 

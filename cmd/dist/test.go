@@ -159,7 +159,7 @@ func (t *tester) run() {
 	case "mips", "mipsle", "mips64", "mips64le":
 		t.timeoutScale = 4
 	}
-	_p("timeoutScale=", t.timeoutScale) // t.timeoutScale = 1
+	_p(1, "timeoutScale=", t.timeoutScale) // t.timeoutScale = 1
 
 	if s := os.Getenv("GO_TEST_TIMEOUT_SCALE"); s != "" {
 		t.timeoutScale, err = strconv.Atoi(s)
